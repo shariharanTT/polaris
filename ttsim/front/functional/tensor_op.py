@@ -247,7 +247,7 @@ def tensor_squeeze(self, dim):
     assert self.link_module is not None, f"link_module for {self.name} not specified!!"
     op_name = f"{self.link_module.name}.unsqueeze.impl_{next(counter)}"
     axesTensor = F._from_data(op_name + '.axes', is_const=True, data=np.array([dim]))
-    op = F.Unsqueeze(op_name)
+    op = F.Squeeze(op_name)
     op.set_module(self.link_module)
     self.link_module._op_hndls[op.name] = op
     for x in [self, axesTensor]:

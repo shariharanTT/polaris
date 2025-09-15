@@ -1435,6 +1435,63 @@ class WhereOp(SimOp):
                 }
         return self.perf_stats
 
+class ClipOp(SimOp):
+    def __init__(self, opinfo):
+        super().__init__(opinfo)
+        self.opclass_str: str = 'Clip'
+        check_io_counts(self, in_counts=[1, 3], out_counts=[1, 1])
+
+    def get_perf_counts(self, inT, outT, **kwargs):
+        if self.perf_stats is not None:
+            return self.perf_stats
+
+        # Clip(x, min, max): y = min(max(x, min), max)
+        nElem = inT[0].nelems()
+        outT[0].shape = inT[0].shape
+        outT[0].dtype = inT[0].dtype
+
+        # Count: 1 cmp for min, 1 cmp for max, 1 mov for output
+        instr = {
+            'cmp': 2 * nElem,
+            'mov': nElem
+        }
+        self.perf_stats = {
+            'inElems': nElem,
+            'inBytes': inT[0].nbytes(self.precision),
+            'outElems': outT[0].nelems(),
+            'outBytes': outT[0].nbytes(self.precision),
+            'instrs': instr
+        }
+        return self.perf_stats
+
+class SoftplusOp(SimOp):
+    def __init__(self, opinfo):
+        super().__init__(opinfo)
+        self.opclass_str: str = 'SoftPlus'
+        check_io_counts(self, in_counts=[1, 1], out_counts=[1, 1])
+
+    def get_perf_counts(self, inT, outT, **kwargs):
+        if self.perf_stats is not None:
+            return self.perf_stats
+        # SoftPlus(x) = log(1 + exp(x))
+        nElem = inT[0].nelems()
+        outT[0].shape = inT[0].shape
+        outT[0].dtype = inT[0].dtype
+        instr = {
+            'exp': nElem,      # exp(x)
+            'add': nElem,      # 1 + exp(x)
+            'log': nElem,      # log(1 + exp(x))
+            'mov': nElem       # for output
+        }
+        self.perf_stats = {
+            'inElems': nElem,
+            'inBytes': inT[0].nbytes(self.precision),
+            'outElems': outT[0].nelems(),
+            'outBytes': outT[0].nbytes(self.precision),
+            'instrs': instr
+        }
+        return self.perf_stats
+
 class SoftmaxOp(SimOp):
     def __init__(self, opinfo):
         super().__init__(opinfo)
@@ -2478,6 +2535,49 @@ class FlattenOp(SimOp):
 
         return self.perf_stats
 
+class SumOp(SimOp):
+    def __init__(self, opinfo):
+        super().__init__(opinfo)
+        self.opclass_str: str = 'Sum'
+        check_io_counts(self, in_counts=[1, 1], out_counts=[1, 1])
+        self._kw_args_defaults = {'dim': None}
+        if 'attrs' in opinfo:
+            self.check_known_args(opinfo['attrs'])
+
+    def get_perf_counts(self, inT, outT, **kwargs):
+        if self.perf_stats is not None:
+            return self.perf_stats
+
+        dim = self.attrs.get('dim', None)
+        input_tensor = inT[0]
+        assert input_tensor.check_shape(), f"Illegal Shape for {input_tensor}"
+
+        rank = input_tensor.rank()
+        if dim is not None and dim < 0:
+            dim += rank
+
+        if dim is None:
+            # Sum all elements, output is scalar
+            output_shape = []
+        else:
+            assert 0 <= dim < rank, f"dim {dim} out of bounds for rank {rank}"
+            # Output shape is input shape with dim removed
+            output_shape = [s for i, s in enumerate(input_tensor.shape) if i != dim]
+
+        outT[0].shape = output_shape
+        outT[0].dtype = input_tensor.dtype
+
+        # Number of elements to add: sum along dim
+        nelems = input_tensor.nelems()
+        self.perf_stats = {
+            'inElems': nelems,
+            'inBytes': input_tensor.nbytes(self.precision),
+            'outElems': outT[0].nelems(),
+            'outBytes': outT[0].nbytes(self.precision),
+            'instrs': {'add': nelems}
+        }
+        return self.perf_stats
+
 class VoxelPoolingOp(SimOp):
     """
       Needed for BEVDepth, where it is implemented as a custom CUDA Operator
@@ -2808,6 +2908,55 @@ class PadOp(SimOp):
         }
         return self.perf_stats
 
+class AssignOp(SimOp):
+    def __init__(self, opinfo):
+        super().__init__(opinfo)
+        self.opclass_str: str = 'Assign'
+        check_io_counts(self, in_counts=[2, 2], out_counts=[1, 1])
+
+    def get_perf_counts(self, inT, outT, **kwargs):
+        if self.perf_stats is not None:
+            return self.perf_stats
+
+        # inT[0]: output tensor to assign into
+        # inT[1]: input tensor to assign from
+        # attrs: 'slice' specifies the slice indices for assignment
+
+        output_tensor = inT[0]
+        input_tensor = inT[1]
+        slice_spec = self.attrs.get('slice', None)
+        assert slice_spec is not None, "AssignOp requires 'slice' attribute specifying indices"
+
+        # Validate slice shape matches input tensor shape
+        # For example, to assign y[:, l, :, :] = temp:
+        # - output_tensor: y
+        # - input_tensor: temp
+        # - slice_spec: (slice(None), l, slice(None), slice(None))
+        # So, in AssignOp, set attrs['slice'] = (slice(None), l, slice(None), slice(None))
+        # Then, output_tensor[slice_spec].shape == input_tensor.shape
+        # This is a shape check only; actual assignment is not performed here
+
+        # Compute the shape of the slice
+        # Use numpy to infer the shape
+        dummy = np.empty(output_tensor.shape)
+        sliced = dummy[slice_spec]
+        assert list(sliced.shape) == list(input_tensor.shape), \
+            f"AssignOp: input tensor shape {input_tensor.shape} does not match slice shape {list(sliced.shape)}"
+
+        outT[0].shape = output_tensor.shape
+        outT[0].dtype = output_tensor.dtype
+
+        # Count: 1 mov per element assigned
+        instr_count = {'mov': input_tensor.nelems()}
+        self.perf_stats = {
+            'inElems': input_tensor.nelems(),
+            'inBytes': input_tensor.nbytes(self.precision),
+            'outElems': outT[0].nelems(),
+            'outBytes': outT[0].nbytes(self.precision),
+            'instrs': instr_count
+        }
+        return self.perf_stats
+
 
 ######################  CONCRETE OP IMPLEMENTATION END ##################
 
@@ -2839,10 +2988,12 @@ class PadOp(SimOp):
 def SimOpFactory(optype: str) -> type[SimOp]:
     cls2optype: Dict[type[SimOp], list[str]] = {
             EltwiseBinaryOp      : ['Add', 'Sub', 'Mul', 'Div'],
-            EltwiseUnaryOp       : ['Identity', 'Tanh', 'Sin', 'Cos', 'Neg', 'Sqrt'],
+            EltwiseUnaryOp       : ['Identity', 'Tanh', 'Sin', 'Cos', 'Neg', 'Sqrt', 'Exp', 'Log'],
             ConstantOp           : ['Constant'],
             GatherOp             : ['Gather'],
             LayerNormalizationOp : ['LayerNormalization'],
+            SumOp                : ['Sum'], #Mamba2
+            AssignOp             : ['Assign'], #Mamba2
             MatMulOp             : ['MatMul'],
             SplitOp              : ['Split'],
             ReshapeOp            : ['Reshape'],
@@ -2850,6 +3001,7 @@ def SimOpFactory(optype: str) -> type[SimOp]:
             PadOp                : ['Pad'],
             WhereOp              : ['Where'],
             SoftmaxOp            : ['Softmax'],
+            SoftplusOp           : ['Softplus'],
             PowOp                : ['Pow'],
             UnsqueezeOp          : ['Unsqueeze'],
             SqueezeOp            : ['Squeeze'],
@@ -2864,6 +3016,7 @@ def SimOpFactory(optype: str) -> type[SimOp]:
             RangeOp              : ['Range'],
             GeluOp               : ['Gelu'],
             ReluOp               : ['Relu'],
+            ClipOp               : ['Clip'], #Mamba2
             LeakyReluOp          : ['LeakyRelu'], #Yolo-v7
             SigmoidOp            : ['Sigmoid'], #Yolo-v7
             ResizeOp             : ['Resize'], #Yolo-v7
@@ -2873,7 +3026,7 @@ def SimOpFactory(optype: str) -> type[SimOp]:
             UpsampleOp           : ['Upsample'], #UNet
             ConvTransposeOp      : ['ConvTranspose'], #UNet
             VoxelPoolingOp       : ['VoxelPooling'], #BEVDepth
-            MeanOp               : ['Mean'], #llama2
+            MeanOp               : ['Mean'], #llama2, Mamba2
             ReciprocalOp         : ['Reciprocal'], #llama2
 
             ConvOp               : ['Conv'],   # TBD: step in adding new operator / layer typez
