@@ -45,11 +45,13 @@ def get_tensor_broadcast_shape(shape1, shape2):
     s1 = shape1[::-1]
     s2 = shape2[::-1]
     max_len = max(len(s1), len(s2))
-    s1.extend([1] * (max_len - len(s1)))
-    s2.extend([1] * (max_len - len(s2)))
+    s1_list = list(s1)
+    s2_list = list(s2)
+    s1_list.extend([1] * (max_len - len(s1_list)))
+    s2_list.extend([1] * (max_len - len(s2_list)))
 
     result = []
-    for d1, d2 in zip(s1, s2):
+    for d1, d2 in zip(s1_list, s2_list):
         if d1 == d2:
             result.append(d1)
         elif d1 == 1:
@@ -2531,6 +2533,69 @@ class VoxelPoolingOp(SimOp):
 
         return self.perf_stats
 
+class ReciprocalOp(SimOp):
+    def __init__(self, opinfo):
+        super().__init__(opinfo)
+        self.opclass_str: str = 'Reciprocal'
+        check_io_counts(self, in_counts=[1, 1], out_counts=[1, 1])
+
+    def get_perf_counts(self, inT, outT, **kwargs):
+        if self.perf_stats is not None:
+            return self.perf_stats
+
+        nElem = inT[0].nelems()
+        outT[0].shape = inT[0].shape
+        outT[0].dtype = inT[0].dtype
+        self.perf_stats = {
+                'inElems' : inT[0].nelems(),
+                'inBytes' : inT[0].nbytes(self.precision),
+                'outElems': outT[0].nelems(),
+                'outBytes': outT[0].nbytes(self.precision),
+                'instrs'  : {'div': nElem}
+                }
+        return self.perf_stats
+
+class MeanOp(SimOp):
+    def __init__(self, opinfo):
+        super().__init__(opinfo)
+        self.opclass_str: str = 'Mean'
+        check_io_counts(self, in_counts=[1, 1], out_counts=[1, 1])
+        self._kw_args_defaults = {'dim': None}
+        if 'attrs' in opinfo:
+            self.check_known_args(opinfo['attrs'])
+
+    def get_perf_counts(self, inT, outT, **kwargs):
+        if self.perf_stats is not None:
+            return self.perf_stats
+
+        dim = self.attrs.get('dim', None)
+        input_tensor = inT[0]
+        assert input_tensor.check_shape(), f"Illegal Shape for {input_tensor}"
+
+        rank = input_tensor.rank()
+        if dim is not None and dim < 0:
+            dim += rank
+
+        if dim is None:
+            # Mean all elements, output is scalar
+            output_shape = []
+        else:
+            assert 0 <= dim < rank, f"dim {dim} out of bounds for rank {rank}"
+            # Output shape is input shape with dim removed
+            output_shape = [s for i, s in enumerate(input_tensor.shape) if i != dim]
+
+        outT[0].shape = output_shape
+        outT[0].dtype = input_tensor.dtype
+
+        nelems = input_tensor.nelems()
+        self.perf_stats = {
+            'inElems': nelems,
+            'inBytes': input_tensor.nbytes(self.precision),
+            'outElems': outT[0].nelems(),
+            'outBytes': outT[0].nbytes(self.precision),
+            'instrs': {'add': nelems, 'div': outT[0].nelems()}
+        }
+        return self.perf_stats
 
 class UpsampleOp(SimOp):
     """
@@ -2774,7 +2839,7 @@ class PadOp(SimOp):
 def SimOpFactory(optype: str) -> type[SimOp]:
     cls2optype: Dict[type[SimOp], list[str]] = {
             EltwiseBinaryOp      : ['Add', 'Sub', 'Mul', 'Div'],
-            EltwiseUnaryOp       : ['Identity', 'Tanh', 'Sin', 'Cos', 'Neg'],
+            EltwiseUnaryOp       : ['Identity', 'Tanh', 'Sin', 'Cos', 'Neg', 'Sqrt'],
             ConstantOp           : ['Constant'],
             GatherOp             : ['Gather'],
             LayerNormalizationOp : ['LayerNormalization'],
@@ -2808,6 +2873,8 @@ def SimOpFactory(optype: str) -> type[SimOp]:
             UpsampleOp           : ['Upsample'], #UNet
             ConvTransposeOp      : ['ConvTranspose'], #UNet
             VoxelPoolingOp       : ['VoxelPooling'], #BEVDepth
+            MeanOp               : ['Mean'], #llama2
+            ReciprocalOp         : ['Reciprocal'], #llama2
 
             ConvOp               : ['Conv'],   # TBD: step in adding new operator / layer typez
             MaxPoolOp            : ['MaxPool'],
