@@ -25,6 +25,7 @@ from ttsim.front import onnx2graph
 from ttsim.utils.common import get_ttsim_functional_instance, print_csv, str_to_bool
 from ttsim.utils.types import get_sim_dtype, get_bpe
 import ttsim.config.runcfgmodel as runcfgmodel
+from ttsim.back.device import Device
 
 """ Polaris top-level executable. """
 
@@ -434,11 +435,8 @@ def execute_wl_on_dev(_wl, _dl, _wspec, _dspec, wlmapspec, _WLG,
             raise
 
         try:
-            wlgraph.set_precision (wlmapspec.data_type_spec)
-            wlgraph.map_resources (wlmapspec.rsrc_spec)
-            wlgraph.execute       (dev_obj)
-            wlgraph.remove_nodes  (wlmapspec.removal_spec)
-            wlgraph.fuse_nodes    (wlmapspec.fusion_spec)
+            cur_device = Device(dev_obj)
+            cur_device.execute_graph(wlgraph, wlmapspec)
         except Exception as e:
             num_failures += 1
             ERROR('workload {} failed with {}', exp_wl, e)
